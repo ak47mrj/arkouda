@@ -3378,7 +3378,7 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
           }
 
           for s in D1 {
-            writeln("\n\n##########For ", s, ":"); 
+            // writeln("\n\n##########For ", s, ":"); 
             // Initialization step. Lines 4-9 in Algorithm 1.
             forall t in D1 {
               Succ[t].clear(); 
@@ -3492,7 +3492,7 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
                     Succ[v].add(w); 
                     sigma[w].fetchAdd(sigma[v].read());
                   }
-                  writeln("S for phase ", phase, ": ", S); 
+                  // writeln("S for phase ", phase, ": ", S); 
                 }
               }
               phase = phase + 1;
@@ -3501,39 +3501,39 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
             // Initialize the delta for the summations in this step. 
             // var delta: [d6] real; 
             var delta = makeDistArray(Nv, real); 
-            writeln("\n###SEQ### Betweenness and dependency summation phase: "); 
+            // writeln("\n###SEQ### Betweenness and dependency summation phase: "); 
             while(phase > 0) {
               // Sum up the dsw values and add them to our betweenness value 
               // array. 
-              writeln("##PAR## S[", phase, "] used in betweenness summation: ", S.getValue(phase)); 
+              // writeln("##PAR## S[", phase, "] used in betweenness summation: ", S.getValue(phase)); 
               forall w in S.getValue(phase) {
                 var dsw:real = 0;
                 var sw:real = sigma[w].read();
-                writeln("sigma[",w,"] aka sw= ", sw); 
+                // writeln("sigma[",w,"] aka sw= ", sw); 
                 for v in Succ[w] {
                   var inner1:real = sw / sigma[v].read();
                   var inner2:real = 1 + delta[v];
 
-                  writeln("sw / sigma[",v,"].read() = ", inner1); 
-                  writeln("1 + delta[",v,"] = ", inner2);
+                  //writeln("sw / sigma[",v,"].read() = ", inner1); 
+                  //writeln("1 + delta[",v,"] = ", inner2);
 
                   dsw = dsw + inner1 * inner2; 
-                  writeln("dsw = dsw + inner1 * inner2 = ", dsw); 
+                  //writeln("dsw = dsw + inner1 * inner2 = ", dsw); 
                 }
                 delta[w] = dsw; 
-                writeln("delta[",w,"] = ", delta[w]);
+                //writeln("delta[",w,"] = ", delta[w]);
                 BC[w] = BC[w] + dsw; 
-                writeln("BC[",w,"] after BC[w] + dsw = ", BC[w]); 
+                //writeln("BC[",w,"] after BC[w] + dsw = ", BC[w]); 
               }
               phase = phase - 1;
              }
           }
           // Print out our betweenness centrality array. 
-          write("$$$$$$$$$$$$BC=");
+          //write("$$$$$$$$$$$$BC=");
           for i in BC {
               writef("%i ", i); 
           }
-          write("$$$$$$$$$$$$$$$$$$$$$$$\n"); 
+          //write("$$$$$$$$$$$$$$$$$$$$$$$\n"); 
           // writeln("$$$$$$$$$$$$","BC=",BC," $$$$$$$$$$$$$$$$$$$$$$$"); 
           return "okay";
       }
