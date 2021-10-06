@@ -4262,8 +4262,154 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
           return "success";
       }//end of _d1_bfs_kernel_u
 
-      // One of the higher level BFS that we will be looking at. 
       proc fo_bag_bfs_kernel_u(nei:[?D1] int, start_i:[?D2] int,src:[?D3] int, dst:[?D4] int,
+                        neiR:[?D11] int, start_iR:[?D12] int,srcR:[?D13] int, dstR:[?D14] int, 
+                        LF:int,GivenRatio:real):string throws{
+          var cur_level=0;
+          //var SetCurF: domain(int);//use domain to keep the current frontier
+          //var SetNextF:domain(int);//use domain to keep the next frontier
+          var SetCurF=  new DistBag(int,Locales);//use bag to keep the current frontier
+          var SetNextF=  new DistBag(int,Locales); //use bag to keep the next frontier
+          //var SetCurF= new set(int,parSafe = true);//use set to keep the current frontier
+          //var SetNextF=new set(int,parSafe = true);//use set to keep the next fromtier
+          SetCurF.add(root);
+          var numCurF=1:int;
+          var topdown=0:int;
+          var bottomup=0:int;
+
+          //while (!SetCurF.isEmpty()) {
+          while (numCurF>0) {
+                //writeln("SetCurF=");
+                //writeln(SetCurF);
+                coforall loc in Locales  with (ref SetNextF,+ reduce topdown, + reduce bottomup) {
+                   on loc {
+                       ref srcf=src;
+                       ref df=dst;
+                       ref nf=nei;
+                       ref sf=start_i;
+
+                       ref srcfR=srcR;
+                       ref dfR=dstR;
+                       ref nfR=neiR;
+                       ref sfR=start_iR;
+
+                       var edgeBegin=src.localSubdomain().low;
+                       var edgeEnd=src.localSubdomain().high;
+                       var vertexBegin=src[edgeBegin];
+                       var vertexEnd=src[edgeEnd];
+                       var vertexBeginR=srcR[edgeBegin];
+                       var vertexEndR=srcR[edgeEnd];
+
+                       proc xlocal(x :int, low:int, high:int):bool{
+                                  if (low<=x && x<=high) {
+                                      return true;
+                                  } else {
+                                      return false;
+                                  }
+                       }
+                       var switchratio=(numCurF:real)/nf.size:real;
+                       if (switchratio<GivenRatio) {//top down
+                           topdown+=1;
+                           forall i in SetCurF with (ref SetNextF) {
+                              if ((xlocal(i,vertexBegin,vertexEnd)) || (LF==0)) {// current edge has the vertex
+                                  var    numNF=nf[i];
+                                  var    edgeId=sf[i];
+                                  var nextStart=max(edgeId,edgeBegin);
+                                  var nextEnd=min(edgeEnd,edgeId+numNF-1);
+                                  ref NF=df[nextStart..nextEnd];
+                                  forall j in NF with (ref SetNextF){
+                                         if (depth[j]==-1) {
+                                               depth[j]=cur_level+1;
+                                               SetNextF.add(j);
+                                         }
+                                  }
+                              } 
+                              if ((xlocal(i,vertexBeginR,vertexEndR)) || (LF==0))  {
+                                  var    numNF=nfR[i];
+                                  var    edgeId=sfR[i];
+                                  var nextStart=max(edgeId,edgeBegin);
+                                  var nextEnd=min(edgeEnd,edgeId+numNF-1);
+                                  ref NF=dfR[nextStart..nextEnd];
+                                  forall j in NF with (ref SetNextF)  {
+                                         if (depth[j]==-1) {
+                                               depth[j]=cur_level+1;
+                                               SetNextF.add(j);
+                                         }
+                                  }
+                              }
+                           }//end coforall
+                       }else {// bottom up
+                           bottomup+=1;
+                           //var UnVisitedSet= new set(int,parSafe = true);//use set to keep the unvisited vertices
+                           //forall i in vertexBegin..vertexEnd with (ref UnVisitedSet) {
+                           //   if depth[i]==-1 {
+                           //      UnVisitedSet.add(i);
+                           //   }
+                           //}
+                           forall i in vertexBegin..vertexEnd  with (ref SetNextF) {
+                           //forall i in UnVisitedSet  with (ref SetNextF) {
+                              if depth[i]==-1 {
+                                  var    numNF=nf[i];
+                                  var    edgeId=sf[i];
+                                  var nextStart=max(edgeId,edgeBegin);
+                                  var nextEnd=min(edgeEnd,edgeId+numNF-1);
+                                  ref NF=df[nextStart..nextEnd];
+                                  forall j in NF with (ref SetNextF){
+                                         if (SetCurF.contains(j)) {
+                                               depth[i]=cur_level+1;
+                                               SetNextF.add(i);
+                                         }
+                                  }
+
+                              }
+                           }
+                           //UnVisitedSet.clear();
+                           //forall i in vertexBeginR..vertexEndR with (ref UnVisitedSet) {
+                           //   if depth[i]==-1 {
+                           //      UnVisitedSet.add(i);
+                           //   }
+                           //}
+                           forall i in vertexBeginR..vertexEndR  with (ref SetNextF) {
+                           //forall i in UnVisitedSet  with (ref SetNextF) {
+                              if depth[i]==-1 {
+                                  var    numNF=nfR[i];
+                                  var    edgeId=sfR[i];
+                                  var nextStart=max(edgeId,edgeBegin);
+                                  var nextEnd=min(edgeEnd,edgeId+numNF-1);
+                                  ref NF=dfR[nextStart..nextEnd];
+                                  forall j in NF with (ref SetNextF)  {
+                                         if (SetCurF.contains(j)) {
+                                               depth[i]=cur_level+1;
+                                               SetNextF.add(i);
+                                         }
+                                  }
+                              }
+                           }
+                       }
+                   }//end on loc
+                }//end coforall loc
+                cur_level+=1;
+                numCurF=SetNextF.getSize();
+                //numCurF=SetNextF.size;
+                //writeln("SetCurF= ", SetCurF, " SetNextF=", SetNextF, " level ", cur_level+1," numCurf=", numCurF);
+                //numCurF=SetNextF.size;
+                //SetCurF=SetNextF;
+                //SetCurF.clear();
+                SetCurF<=>SetNextF;
+                SetNextF.clear();
+          }//end while  
+          writeln("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$");
+          writeln("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$");
+          writeln("$$$$$$$$$$$$$$$Search Radius = ", cur_level+1,"$$$$$$$$$$$$$$$$$$$$$$");
+          writeln("$$$$$$$$$$number of top down = ",topdown, " number of bottom up=", bottomup,"$$$$$$");
+          writeln("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$");
+          writeln("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$");
+          return "success";
+      }//end of fo_bag_bfs_kernel_u
+
+      // One of the higher level BFS that we will be looking at with experimental
+      // switching meechanism.
+      proc experimental_fo_bag_bfs_kernel_u(nei:[?D1] int, start_i:[?D2] int,src:[?D3] int, dst:[?D4] int,
                         neiR:[?D11] int, start_iR:[?D12] int,srcR:[?D13] int, dstR:[?D14] int, 
                         LF:int,GivenRatio:real):string throws{
           
@@ -4488,7 +4634,9 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
           writeln("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$");
           writeln("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$");
           return "success";
-      }//end of fo_bag_bfs_kernel_u
+      }//end of experimental_fo_bag_bfs_kernel_u
+
+
 
 
       proc fo_bag_bfs_kernel(nei:[?D1] int, start_i:[?D2] int,src:[?D3] int, dst:[?D4] int,
