@@ -1,10 +1,11 @@
 #!/usr/bin/env python3                                                         
 
 import time, argparse
-import numpy as np
-import arkouda as ak
 import random
 import string
+import numpy as np
+import arkouda as ak
+import sys
 
 TYPES = ('int64', 'float64', 'bool', 'str')
 
@@ -182,7 +183,6 @@ def create_parser():
 
     
 if __name__ == "__main__":
-    import sys
     parser = create_parser()
     args = parser.parse_args()
     ak.verbose = False
@@ -220,10 +220,37 @@ if __name__ == "__main__":
     '''
 
     # time_ak_tri_graphs("/rhome/zhihui/ArkoudaExtension/arkouda/data/com-friendster.ungraph.txt", 1806067135, 65608366)
+    # print(f"ak.__file__: {ak.__file__}")
+    # print(f"sys.path: {sys.path}")
+    # Graph1 = ak.graph_file_read(78,34,2,0,"/rhome/oaa9/ArkoudaExtension/testingFiles/data/graphs/soc-karate.mtx")
+    # Graph2 = ak.graph_file_read(78,34,2,1,"/rhome/oaa9/ArkoudaExtension/testingFiles/data/graphs/soc-karate.mtx")
+    # Graph1 = ak.graph_file_read(13,10,2,0,"/rhome/oaa9/ArkoudaExtension/testingFiles/data/graphs/simple2.txt")
+    Graph1 = ak.graph_file_read(4,5,2,0,"/rhome/oaa9/ArkoudaExtension/testingFiles/data/graphs/line2.txt")
+    # print(Graph)
+    # Graph2 = ak.graph_file_read(13,10,2,1,"/rhome/oaa9/ArkoudaExtension/testingFiles/data/graphs/simple2.txt")
+    # print(Graph)
+    bc1 = ak.graph_bc(Graph1)
+    # bc2 = ak.graph_bc(Graph2)
+    print("bc1=", bc1)
+    # print("bc2=", bc2)
 
-    Graph = ak.graph_file_read(51971,9877,2,0,"/rhome/oaa9/ArkoudaExtension/testingFiles/data/graphs/ca-HepTh.txt")
-    print(Graph)
-    bc = ak.graph_bc(Graph)
-    print(bc)
+    # for i in range(21, 25): 
+    #     filename="delaunay_n" + str(i)
+    #     f = open("/rhome/oaa9/ArkoudaExtension/testingFiles/data/delaunay/"+filename+"/"+filename+".mtx")
+    #     Line = f.readline()
+    #     while not(Line[1]>='0' and Line[0]<='9'):
+    #         Line = f.readline()
+    #         b = Line.split(" ")
+    #     edges=int(b[2])
+    #     vertices=max(int(b[0]),int(b[1]))
+
+    #     Graph = ak.graph_file_read(edges, vertices, 2, 0, "/rhome/oaa9/ArkoudaExtension/testingFiles/data/delaunay/"+filename+"/"+filename+".gr")
+    #     bfs = ak.graph_bfs(Graph, 0)
+    #     print("BFS for", filename, ":", bfs)
     
-    ak.shutdown()
+    # bfs1 = ak.graph_bfs(Graph1, 0)
+    # bfs2 = ak.graph_bfs(Graph2)
+    # print("bfs1=", bfs1)
+    # print("bfs2=", bfs2)
+    
+    # ak.shutdown()

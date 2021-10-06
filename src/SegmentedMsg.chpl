@@ -18,11 +18,14 @@ module SegmentedMsg {
   use RadixSortLSD;
   use Set;
   use DistributedBag;
+  use List; 
+  use LockFreeStack;
   public use ArgSortMsg;
   use Time;
   use CommAggregation;
   use Sort;
   use Atomics;
+  use IO.FormattedIO; 
 
   private config const DEBUG = false;
   const smLogger = new Logger();
@@ -3335,10 +3338,8 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
   }
 
   proc segBCMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTuple throws {
-      var (n_verticesN, n_edgesN, directedN, weightedN, restpart)
-          = payload.splitMsgToTuple(5); 
+      var (n_verticesN, n_edgesN, directedN, weightedN, restpart) = payload.splitMsgToTuple(5); 
 
-      //writeln(payload.splitMsgToTuple(5));
       var Nv = n_verticesN:int; 
       var Ne = n_edgesN:int; 
       var Directed = directedN:int; 
@@ -3346,37 +3347,378 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
       var BCName:string; 
       var srcN, dstN, startN, neighbourN, vweightN, eweightN, rootN:string;
       var srcRN, dstRN, startRN, neighbourRN:string;
-      var BC = makeDistArray(Nv, int); 
+      var BC = makeDistArray(Nv, real); 
+      var timer:Timer; 
+      timer.start(); 
 
-      proc bc_kernel_und_unw(nei:[?D1] int, start_i:[?D2] int,src:[?D3] int, dst:[?D4] int,
-                            neiR:[?D11] int, start_iR:[?D12] int,srcR:[?D13] int, dstR:[?D14] int):string throws {
-        
-          // Make the distributed arrays used for 
-          var sp_count = makeDistArray(Nv, int);
-          var dist = makeDistArray(Nv, int);
-          var P = makeDistArray(Nv, DistBag(int)); 
-          writeln(P); 
+      // Implementation of the algorithm for undirected and unweighted graphs. 
+      // It uses lists and arrays. It increments atomics, but uses higher level 
+      // parallel-safe Chapel data structures for Succ and and S arrays.
+      proc bc_kernel_und_unw(nei:[?D1] int, start_i:[?D2] int,src:[?D3] int, dst:[?D4] int, neiR:[?D11] int, start_iR:[?D12] int,srcR:[?D13] int, dstR:[?D14] int):string throws {
+          // var BC = makeDistArray(Nv, real);
+          var sigma = makeDistArray(Nv, atomic int); 
+          var d = makeDistArray(Nv, atomic int); 
+          var Succ = makeDistArray(Nv, DistBag(int));
+          var Succ_count = makeDistArray(Nv, atomic int); 
 
+          // writeln("nei=", nei);  
+          // writeln("neiR=", neiR); 
+          // writeln("start_i=", start_i); 
+          // writeln("start_iR=", start_iR); 
+          // writeln("src=", src); 
+          // writeln("srcR=", srcR); 
+          // writeln("dst=", dst); 
+          // writeln("dstR=", dstR); 
+
+          // Not needed for final deployment, only here for debugging purposes,
+          // since running it 50 times from Chapel side to ensure correctness
+          // requires having to clear BC. 
           forall s in D1 {
-            forall t in D1 {
-              sp_count[t] = 0; 
-              dist[t] = -1; 
-            }
+              BC[s] = 0; 
           }
+
+          for s in D1 {
+            writeln("\n\n##########For ", s, ":"); 
+            // Initialization step. Lines 4-9 in Algorithm 1.
+            forall t in D1 {
+              Succ[t].clear(); 
+              sigma[t].write(0); 
+              d[t].write(-1); 
+              Succ_count[t].write(0); 
+            }
+            // writeln("Succ=", Succ); 
+            sigma[s].write(1);
+            d[s].write(0);
+            var phase:int = 0; 
+            
+            // The S array. We will use a Chapel list and treat is as a stack.
+            var S: list(list(int, parSafe=true), parSafe=true); 
+            var newPhase: list(int, parSafe=true);
+            S.append(newPhase);
+            
+            // Attach s to the new phase to get updatedPhase. 
+            record MyUpdater {
+                var updateWith: int; 
+                proc this(i: int, ref l:list(int, parSafe=true)) {
+                    l.append(updateWith); 
+                    return i; 
+                }
+            }
+            var updater = new MyUpdater(); 
+            updater.updateWith = s; 
+            S.update(phase, updater); 
+            
+            // My workaround for the updater above. 
+            // var updatedPhase = S.getValue(phase); 
+            // updatedPhase.append(s);
+            // S.set(phase, updatedPhase); 
+
+            // This line is a deprecated way of updating the BFS phase. 
+            // S[phase].append(s)
+            
+            // Initialize count. 
+            var count: atomic int; 
+            count.write(1); 
+        
+            // Graph traversal step. Algorithm 4.
+            while (count.read() > 0) {
+              count.write(0);
+              // writeln("d while loop iter start=", d); 
+              // writeln("S[phase] at while loop iter start=", S[phase]); 
+              forall v in S.getValue(phase) with (ref S, ref phase) {
+                // Get the starting indices of the arrays that hold the
+                // neighbours of a vertex v. 
+                var start:int = start_i[v];
+                var startR:int = start_iR[v]; 
+
+                // Get the starting indices of the arrays that hold the
+                // neighbours of a vertex v. 
+                var end:int = start + nei[v] - 1; 
+                var endR:int = startR + neiR[v] - 1; 
+                    
+                // Create a new dributed bag to hold the neighbours of v. 
+                // Multiset used instead of set due to multiple edges being
+                // allowed.
+                // var neighbourSet = new set(int, parSafe=true);
+                var neighbourSet = new DistBag(int);
+
+                // Add to a neighbourSet the neighbors of v.
+                for i in dst[start..end] do neighbourSet.add(i); 
+                for i in dstR[startR..endR] do neighbourSet.add(i);  
+                // writeln("neighbourSet for ", v, ": ", neighbourSet); 
+                    
+                // The actual breadth-first search algorithm for traversing 
+                // each neighbour w of v. 
+                forall w in neighbourSet with (ref S, ref phase, var updater = new MyUpdater()) {
+                  var dw:int = d[w].read(); 
+                  var res:bool = d[w].compareAndSwap(-1, phase + 1);
+                  // The vertex has not been visited yet.
+                  if dw == -1 {
+                    // Atomic instruction to update the count. 
+                    // p is not used. 
+                    var p:int = count.fetchAdd(1);
+                            
+                    // Resize S so that way we can append the next frontier
+                    // in the BFS traversal.
+                    var Ssize:int = S.size; 
+                    if phase + 1 >= Ssize {
+                      var newPhase: list(int, parSafe=true);
+                      S.append(newPhase);
+                    } 
+                    // Update the next BFS phase. 
+
+                    // The not parallel-safe workaround.
+                    // var updatedPhase = S.getValue(phase+1); 
+                    // updatedPhase.append(w);
+                    // S.set(phase+1, updatedPhase); 
+                    
+                    // Using the updater, how you are "supposed" to do it.
+                    updater.updateWith = w; 
+                    S.update(phase + 1, updater);
+                      
+                    // This is the deprecated way of doing it. 
+                    // S[phase+1].append(w); 
+                      
+                    dw = phase + 1;
+                  }
+                  // The vertex has been visited.
+                  if dw == phase + 1 {
+                    // Atomic instruction to update the Succ array.
+                    // p is not used. 
+                    var p:int = Succ_count[v].fetchAdd(1); 
+
+                    // This is only for list. 
+                    // Succ[v].set(p, w);
+                    Succ[v].add(w); 
+                    sigma[w].fetchAdd(sigma[v].read());
+                  }
+                  writeln("S for phase ", phase, ": ", S); 
+                }
+              }
+              phase = phase + 1;
+            }
+            phase = phase - 1; 
+            // Initialize the delta for the summations in this step. 
+            // var delta: [d6] real; 
+            var delta = makeDistArray(Nv, real); 
+            writeln("\n###SEQ### Betweenness and dependency summation phase: "); 
+            while(phase > 0) {
+              // Sum up the dsw values and add them to our betweenness value 
+              // array. 
+              writeln("##PAR## S[", phase, "] used in betweenness summation: ", S.getValue(phase)); 
+              forall w in S.getValue(phase) {
+                var dsw:real = 0;
+                var sw:real = sigma[w].read();
+                writeln("sigma[",w,"] aka sw= ", sw); 
+                for v in Succ[w] {
+                  var inner1:real = sw / sigma[v].read();
+                  var inner2:real = 1 + delta[v];
+
+                  writeln("sw / sigma[",v,"].read() = ", inner1); 
+                  writeln("1 + delta[",v,"] = ", inner2);
+
+                  dsw = dsw + inner1 * inner2; 
+                  writeln("dsw = dsw + inner1 * inner2 = ", dsw); 
+                }
+                delta[w] = dsw; 
+                writeln("delta[",w,"] = ", delta[w]);
+                BC[w] = BC[w] + dsw; 
+                writeln("BC[",w,"] after BC[w] + dsw = ", BC[w]); 
+              }
+              phase = phase - 1;
+             }
+          }
+          // Print out our betweenness centrality array. 
+          write("$$$$$$$$$$$$BC=");
+          for i in BC {
+              writef("%i ", i); 
+          }
+          write("$$$$$$$$$$$$$$$$$$$$$$$\n"); 
+          // writeln("$$$$$$$$$$$$","BC=",BC," $$$$$$$$$$$$$$$$$$$$$$$"); 
           return "okay";
-        } 
+      }
     
-      (srcN, dstN, startN, neighbourN, srcRN, dstRN, startRN, neighbourRN) =
-                   restpart.splitMsgToTuple(8);
+      // Implementation of the algorithm for directed and unweighted graphs. 
+      // It uses lists and arrays. It increments atomics, but uses higher level 
+      // parallel-safe Chapel data structures for Succ and and S arrays.
+      proc bc_kernel_dir_unw(nei:[?D1] int, start_i:[?D2] int,src:[?D3] int, dst:[?D4] int):string throws {
+        var sigma = makeDistArray(Nv, atomic int); 
+        var d = makeDistArray(Nv, atomic int); 
+        var Succ = makeDistArray(Nv, DistBag(int));
+        var Succ_count = makeDistArray(Nv, atomic int); 
 
-      //writeln(restpart.splitMsgToTuple(10)); 
+        // writeln("nei=", nei); 
+        // writeln("start_i=", start_i); 
+        // writeln("src=", src); 
+        // writeln("dst=", dst); 
 
-      var ag = new owned SegGraphUD(Nv, Ne, Directed, Weighted,
-            srcN, dstN, startN, neighbourN,
-            srcRN, dstRN, startRN, neighbourRN, st);
-    
-      var temp = bc_kernel_und_unw(ag.neighbour.a, ag.start_i.a, ag.src.a, ag.dst.a, 
-                    ag.neighbourR.a, ag.start_iR.a, ag.srcR.a, ag.dstR.a);
+        // Not needed for final deployment, only here for debugging purposes,
+        // since running it 50 times from Chapel side to ensure correctness
+        // requires having to clear BC. 
+        forall s in D1 {
+          BC[s] = 0; 
+        }
+
+        for s in D1 {
+          // Initialization step. Lines 4-9 in Algorithm 1.
+          forall t in D1 {
+            Succ[t].clear(); 
+            sigma[t].write(0); 
+            d[t].write(-1); 
+            Succ_count[t].write(0); 
+          }
+          // writeln("Succ=", Succ); 
+          sigma[s].write(1);
+          d[s].write(0);
+          var phase:int = 0; 
+            
+          // The S array. We will use a Chapel list and treat is as a stack.
+          var S: list(list(int, parSafe=true), parSafe=true); 
+          var newPhase: list(int, parSafe=true);
+          S.append(newPhase);
+            
+          // Attach s to the new phase to get updatedPhase. 
+          record MyUpdater {
+            var updateWith: int; 
+                proc this(i: int, ref l:list(int, parSafe=true)) {
+                    l.append(updateWith); 
+                    return i; 
+                }
+          }
+          var updater = new MyUpdater(); 
+          updater.updateWith = s; 
+          S.update(phase, updater); 
+
+          var count: atomic int; 
+          count.write(1); 
+        
+          // Graph traversal step. Algorithm 4.
+          while (count.read() > 0) {
+            count.write(0);
+            // writeln("d while loop iter start=", d); 
+            // writeln("S[phase] at while loop iter start=", S[phase]); 
+            forall v in S.getValue(phase) with (ref S, ref phase) {
+              // Get the starting indices of the arrays that hold the
+              // neighbours of a vertex v. 
+              var start:int = start_i[v];
+
+              // Get the starting indices of the arrays that hold the
+              // neighbours of a vertex v. 
+              var end:int = start + nei[v] - 1; 
+                    
+              // Create a new dributed bag to hold the neighbours of v. 
+              // Multiset used instead of set due to multiple edges being
+              // allowed.
+              // var neighbourSet = new set(int, parSafe=true);
+              var neighbourSet = new DistBag(int);
+
+              // Add to a neighbourSet the neighbors of v.
+              for i in dst[start..end] do neighbourSet.add(i); 
+              // writeln("neighbourSet for ", v, ": ", neighbourSet); 
+                    
+              // The actual breadth-first search algorithm for traversing 
+              // each neighbour w of v. 
+              forall w in neighbourSet with (ref S, ref phase, var updater = new MyUpdater()) {
+                var dw:int = d[w].read(); 
+                var res:bool = d[w].compareAndSwap(-1, phase+1);
+                // The vertex has not been visited yet.
+                if dw == -1 {
+                  // Not used --- is it really even needed?
+                  var p:int = count.fetchAdd(1);
+                            
+                  // Resize S so that way we can append the next frontier
+                  // in the BFS traversal.
+                  var Ssize:int = S.size; 
+                  if phase + 1 >= Ssize {
+                    var newPhase: list(int, parSafe=true);
+                    S.append(newPhase);
+                  } 
+                  // Update the next BFS phase. 
+
+                  // The not parallel-safe workaround.
+                  // var updatedPhase = S.getValue(phase+1); 
+                  // updatedPhase.append(w);
+                  // S.set(phase+1, updatedPhase); 
+                    
+                  // Using the updater, how you are "supposed" to do it.
+                  updater.updateWith = w; 
+                  S.update(phase + 1, updater);
+                      
+                  // This is the deprecated way of doing it. 
+                  // S[phase+1].append(w); 
+
+                  dw = phase + 1; 
+                }
+                // The vertex has ben visited.
+                if dw == phase + 1 {
+                  // Atomic instruction to update the Succ array.
+                  // Not used --- introduces some bugs.
+                  var p:int = Succ_count[v].fetchAdd(1); 
+
+                  // This is only for list. 
+                  // Succ[v].set(p, w);
+                  Succ[v].add(w); 
+                  sigma[w].fetchAdd(sigma[v].read());
+                }
+              }
+            }
+            phase = phase + 1;
+          }
+          phase = phase - 1; 
+          // Initialize the delta for the summations in this step. 
+          // var delta: [d6] real; 
+          var delta = makeDistArray(Nv, real); 
+          while(phase > 0) {
+            // Sum up the dsw values and add them to our betweenness value 
+            // array. 
+            forall w in S.getValue(phase) {
+              var dsw:real = 0;
+              var sw:real = sigma[w].read();
+              for v in Succ[w] {
+                var inner1:real = sw / sigma[v].read();
+                var inner2:real = 1 + delta[v];
+                dsw = dsw + inner1 * inner2; 
+              }
+              delta[w] = dsw; 
+              BC[w] = BC[w] + dsw; 
+            }
+            phase = phase - 1;
+          }
+        }
+        // Print out our betweenness centrality array. 
+        write("$$$$$$$$$$$$BC=");
+        for i in BC {
+          writef("%i ", i); 
+        }
+        write("$$$$$$$$$$$$$$$$$$$$$$$\n"); 
+        // writeln("$$$$$$$$$$$$","BC=",BC," $$$$$$$$$$$$$$$$$$$$$$$"); 
+        return "okay";
+      }
+
+      if (Weighted == 0)  {
+        if (Directed == 0) {
+          (srcN, dstN, startN, neighbourN, srcRN, dstRN, startRN, neighbourRN) =restpart.splitMsgToTuple(8);
+
+          var ag = new owned SegGraphUD(Nv, Ne, Directed, Weighted, srcN, dstN, startN, neighbourN, srcRN, dstRN, startRN, neighbourRN, st);
+
+          for i in 1..1 do var temp = bc_kernel_und_unw(ag.neighbour.a, ag.start_i.a, ag.src.a, ag.dst.a, ag.neighbourR.a, ag.start_iR.a, ag.srcR.a, ag.dstR.a);
+          // var temp = bc_kernel_und_unw(ag.neighbour.a, ag.start_i.a, ag.src.a, ag.dst.a, ag.neighbourR.a, ag.start_iR.a, ag.srcR.a, ag.dstR.a);
+
+        } else {
+          (srcN, dstN, startN, neighbourN) = restpart.splitMsgToTuple(4);
+
+          var ag = new owned SegGraphD(Nv, Ne, Directed, Weighted, srcN, dstN, startN, neighbourN, st);
+
+          for i in 1..1 do var temp = bc_kernel_dir_unw(ag.neighbour.a, ag.start_i.a, ag.src.a, ag.dst.a);
+          // var temp = bc_kernel_dir_unw(ag.neighbour.a, ag.start_i.a, ag.src.a, ag.dst.a);
+        }
+      }
+      timer.stop(); 
+      writeln("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$");
+      writeln("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$");
+      writeln("$$$$$$$$$$$$$$$BC Time = ", timer.elapsed() ,"$$$$$$$$$$$$$$$$$$$$$$");
+      writeln("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$");
+      writeln("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$");
       
       // The message that is sent back to the Python front-end. 
       proc return_BC(): string throws {
@@ -3386,7 +3728,7 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
 
           var BCMsg =  'created ' + st.attrib(BCName);
           return BCMsg;
-        }
+      }
 
       var repMsg = return_BC();
       return new MsgTuple(repMsg, MsgType.NORMAL);
@@ -3394,9 +3736,12 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
 
   //proc segBFSMsg(cmd: string, payload: bytes, st: borrowed SymTab): MsgTuple throws {
   proc segBFSMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTuple throws {
+      
+      // Initialize variables to use for the BFS traversal. 
       var repMsg: string;
-      //var (n_verticesN,n_edgesN,directedN,weightedN,srcN, dstN, startN, neighbourN,vweightN,eweightN, rootN )
+      //var (n_verticesN,n_edgesN,directedN,weightedN,srcN, dstN, startN, neighbourN,vweightN,eweightN, rootN)
       //    = payload.decode().splitMsgToTuple(10);
+      // Split the payload from Python to get the needed items. 
       var (RCMs,n_verticesN,n_edgesN,directedN,weightedN,restpart )
           = payload.splitMsgToTuple(6);
       var Nv=n_verticesN:int;
@@ -3408,6 +3753,9 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
       var timer:Timer;
       timer.start();
       var depth=makeDistArray(Nv,int);
+      
+      // Main distribution idea. Make the depth all -1 in the local subdomain
+      // of a locale. 
       coforall loc in Locales  {
                   on loc {
                            forall i in depth.localSubdomain() {
@@ -3420,8 +3768,7 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
       var srcN, dstN, startN, neighbourN,vweightN,eweightN, rootN :string;
       var srcRN, dstRN, startRN, neighbourRN:string;
        
-
-
+      // lower-level bfs. 
       proc _d1_bfs_kernel(nei:[?D1] int, start_i:[?D2] int,src:[?D3] int, dst:[?D4] int):string throws{
           var cur_level=0;
           var numCurF=1:int;//flag for stopping loop
@@ -3643,7 +3990,7 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
           return "success";
       }//end of_d1_bfs_kernel
 
-
+      // lower-level bfs. 
       proc _d1_bfs_kernel_u(nei:[?D1] int, start_i:[?D2] int,src:[?D3] int, dst:[?D4] int,
                         neiR:[?D11] int, start_iR:[?D12] int,srcR:[?D13] int, dstR:[?D14] int):string throws{
           var cur_level=0;
@@ -3915,27 +4262,61 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
           return "success";
       }//end of _d1_bfs_kernel_u
 
+      // One of the higher level BFS that we will be looking at. 
       proc fo_bag_bfs_kernel_u(nei:[?D1] int, start_i:[?D2] int,src:[?D3] int, dst:[?D4] int,
                         neiR:[?D11] int, start_iR:[?D12] int,srcR:[?D13] int, dstR:[?D14] int, 
                         LF:int,GivenRatio:real):string throws{
+          
+        //   writeln("nei=", nei);  
+        //   writeln("neiR=", neiR); 
+        //   writeln("start_i=", start_i); 
+        //   writeln("start_iR=", start_iR); 
+        //   writeln("src=", src); 
+        //   writeln("srcR=", srcR); 
+        //   writeln("dst=", dst); 
+        //   writeln("dstR=", dstR); 
+          
+          // All BFS starts at level 0 which is where the root is. 
           var cur_level=0;
           //var SetCurF: domain(int);//use domain to keep the current frontier
           //var SetNextF:domain(int);//use domain to keep the next frontier
+          
+          // Distributed bag is used to keep the current and the next frontiers. 
           var SetCurF=  new DistBag(int,Locales);//use bag to keep the current frontier
           var SetNextF=  new DistBag(int,Locales); //use bag to keep the next frontier
           //var SetCurF= new set(int,parSafe = true);//use set to keep the current frontier
           //var SetNextF=new set(int,parSafe = true);//use set to keep the next fromtier
+          
+          // Current will obviously have the root as the only vertex. 
           SetCurF.add(root);
+          
+          // Size of current frontier. 
           var numCurF=1:int;
+
+          // Just keep track of how many times we do topdown and bottomup. 
           var topdown=0:int;
           var bottomup=0:int;
+
+          // Flags to track if we are doing top-down or bottom-up. 
+          var topFlag:bool = true; 
+          var bottomFlag:bool = false; 
+
+          // Get total number of edges.
+          var numEdges:int = src.size; 
+          var numVertices:int = nei.size;
+          writeln("numEdges=", numEdges); 
+          writeln("numVertices=", numVertices); 
+          var k:int = numEdges * 2; 
 
           //while (!SetCurF.isEmpty()) {
           while (numCurF>0) {
                 //writeln("SetCurF=");
                 //writeln(SetCurF);
-                coforall loc in Locales  with (ref SetNextF,+ reduce topdown, + reduce bottomup) {
+                // writeln("###cur_level=", cur_level, "###"); 
+                // writeln("SetCurF=", SetCurF);
+                coforall loc in Locales  with (ref SetNextF,+ reduce topdown, + reduce bottomup, ref topFlag, ref bottomFlag, ref numEdges, ref numVertices) {
                    on loc {
+                       // References to our distributed arrays. 
                        ref srcf=src;
                        ref df=dst;
                        ref nf=nei;
@@ -3946,13 +4327,20 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
                        ref nfR=neiR;
                        ref sfR=start_iR;
 
+                       // Where our edge array begins and ends in a locale.
                        var edgeBegin=src.localSubdomain().low;
                        var edgeEnd=src.localSubdomain().high;
+                       
+                       // Get beggining and end vertices in both types of arrays.
                        var vertexBegin=src[edgeBegin];
                        var vertexEnd=src[edgeEnd];
                        var vertexBeginR=srcR[edgeBegin];
                        var vertexEndR=srcR[edgeEnd];
 
+                    //    writeln("On loc ", loc, " edgeBegin=", edgeBegin); 
+                    //    writeln("On loc ", loc, " edgeEnd=", edgeEnd);
+
+                       // This drives making sure we only look at the local vertices, NOT remote ones.
                        proc xlocal(x :int, low:int, high:int):bool{
                                   if (low<=x && x<=high) {
                                       return true;
@@ -3960,9 +4348,44 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
                                       return false;
                                   }
                        }
+                       // The switch ratio is the number of vertices in the current frontier
+                       // divided by the size of the number of vertices.
+
+                       // IDEA: switch from top-down to bottom-up when the number
+                       // of edges in the frontier exceeds 1/10th of the total
+                       // number of edges. 
+                       // Switch back to top-down when the number of vertices
+                       // in the frontier is less than n/14k where k is the
+                       // total degree of the graph.
+                       // Where the frontier is the current frontier.
                        var switchratio=(numCurF:real)/nf.size:real;
-                       if (switchratio<GivenRatio) {//top down
-                           topdown+=1;
+
+                       // NEW SWITCHING MECHANISM:
+                       var numCurrEdges:int = 0; 
+                       forall i in SetCurF with (ref numCurrEdges){
+                           numCurrEdges += nei[i]; 
+                       }
+                       
+                    //    writeln("On loc ", loc, ": numCurrEdges=", numCurrEdges, " numEdges/10=", numEdges/10); 
+                       if(numCurrEdges > numEdges / 10) {
+                           topFlag = false; 
+                           bottomFlag = true; 
+                       }
+                       
+                    //    var numCurrVertices:int = 0; 
+                    //    forall i in SetCurF with (ref numCurrVertices){
+                    //        numCurrVertices += 1; 
+                    //    }
+                    //    writeln("On loc ", loc, ": numCurF=", numCurF, " numVertices/14k=", numVertices/(14*k)); 
+                       if(numCurF > numVertices / (14 * k)) {
+                           topFlag = true; 
+                           bottomFlag = false; 
+                       }
+
+                       //if (switchratio<GivenRatio) {//top down
+                       if(topFlag==true) {//top down
+                           // writeln("topdown"); 
+                           topdown+=1; 
                            forall i in SetCurF with (ref SetNextF) {
                               if ((xlocal(i,vertexBegin,vertexEnd)) || (LF==0)) {// current edge has the vertex
                                   var    numNF=nf[i];
@@ -3970,6 +4393,7 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
                                   var nextStart=max(edgeId,edgeBegin);
                                   var nextEnd=min(edgeEnd,edgeId+numNF-1);
                                   ref NF=df[nextStart..nextEnd];
+                                //   writeln("On ", loc, " for vertex ", i, ": edgeId=", edgeId, " edgeBegin=", edgeBegin, " edgeEnd=", edgeEnd, " edgeID+numNF-1=", edgeId+numNF-1 ," \nwhere NF=", NF); 
                                   forall j in NF with (ref SetNextF){
                                          if (depth[j]==-1) {
                                                depth[j]=cur_level+1;
@@ -3983,6 +4407,7 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
                                   var nextStart=max(edgeId,edgeBegin);
                                   var nextEnd=min(edgeEnd,edgeId+numNF-1);
                                   ref NF=dfR[nextStart..nextEnd];
+                                //   writeln("On ", loc, " for vertex ", i, ": edgeId=", edgeId, " edgeBegin=", edgeBegin, " edgeEnd=", edgeEnd, " edgeID+numNF-1=", edgeId+numNF-1 ," \nwhere NF=", NF);
                                   forall j in NF with (ref SetNextF)  {
                                          if (depth[j]==-1) {
                                                depth[j]=cur_level+1;
@@ -3991,7 +4416,10 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
                                   }
                               }
                            }//end coforall
-                       }else {// bottom up
+
+                       //}else {// bottom up
+                       }if(bottomFlag==true){
+                           // writeln("bottomup"); 
                            bottomup+=1;
                            //var UnVisitedSet= new set(int,parSafe = true);//use set to keep the unvisited vertices
                            //forall i in vertexBegin..vertexEnd with (ref UnVisitedSet) {
@@ -4041,6 +4469,7 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
                        }
                    }//end on loc
                 }//end coforall loc
+                // writeln("SetNextF=", SetNextF);
                 cur_level+=1;
                 numCurF=SetNextF.getSize();
                 //numCurF=SetNextF.size;
@@ -4048,6 +4477,7 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
                 //numCurF=SetNextF.size;
                 //SetCurF=SetNextF;
                 //SetCurF.clear();
+
                 SetCurF<=>SetNextF;
                 SetNextF.clear();
           }//end while  
@@ -4085,7 +4515,6 @@ proc segmentedPeelMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTup
                        ref df=dst;
                        ref nf=nei;
                        ref sf=start_i;
-
 
                        var edgeBegin=src.localSubdomain().low;
                        var edgeEnd=src.localSubdomain().high;

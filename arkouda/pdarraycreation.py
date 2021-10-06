@@ -1156,17 +1156,19 @@ def graph_bc(graph: Union[GraphD,GraphDW,GraphUD,GraphUDW]) -> pdarray:
                 graph.start_iR.name,graph.neighbourR.name,\
                 graph.v_weight.name,graph.e_weight.name)
 
-        #repMsg = generic_msg(msg)
-        repMsg = generic_msg(cmd=cmd,args=args)
-        '''
-        tmpmsg=cast(str,repMsg).split('+')
-        levelstr=tmpmsg[0:1]
-        vertexstr=tmpmsg[1:2]
-        levelary=create_pdarray(*(cast(str,levelstr)) )
-        
-        vertexary=create_pdarray(*(cast(str,vertexstr)) )
-        '''
-        return create_pdarray(repMsg)
+    #repMsg = generic_msg(msg)
+    # print('cmd=', cmd)
+    # print('args=', args)
+    repMsg = generic_msg(cmd=cmd,args=args)
+    '''
+    tmpmsg=cast(str,repMsg).split('+')
+    levelstr=tmpmsg[0:1]
+    vertexstr=tmpmsg[1:2]
+    levelary=create_pdarray(*(cast(str,levelstr)) )
+    
+    vertexary=create_pdarray(*(cast(str,vertexstr)) )
+    '''
+    return create_pdarray(repMsg)
 
 @typechecked
 def graph_bfs (graph: Union[GraphD,GraphDW,GraphUD,GraphUDW], root: int ) -> pdarray:
