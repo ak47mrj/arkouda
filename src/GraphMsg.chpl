@@ -2154,7 +2154,91 @@ module GraphMsg {
       return new MsgTuple(repMsg, MsgType.NORMAL);
   }
 
+  proc segPRMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTuple throws {
+      var (n_verticesN, n_edgesN, directedN, weightedN, restpart) = payload.splitMsgToTuple(5);
 
+      var Nv = n_verticesN:int;
+      var Ne = n_edgesN:int;
+      var Directed = directedN:int; 
+      var Weighted = weightedN:int; 
+      var PR = makeDistArray(Nv, real);
+      var PRName:string; 
+      var srcN, dstN, startN, neighbourN:string;
+      var d = 0.85;
+
+      proc pr_kernel(nei:[?D1] int, start_i:[?D2] int, src:[?D3] int, dst:[?D4] int): string throws{
+          var indegree = makeDistArray(Nv, atomic int);
+          var inneighbor = makeDistArray(Nv, list(int,parSafe=true));
+
+          forall s in D1 {
+              PR[s] = 1/Nv;
+              indegree[s].write(0);
+              inneighbor[s].clear();
+          }
+
+          for s in D3 {
+              var start: int  = src[s];
+              var end: int = dst[s];
+              
+              inneighbor[end].append(start);
+              indegree[end].fetchAdd(1);
+          }
+
+          var count: atomic int; 
+          count.write(1);
+
+          while(count.read()>0){
+              count.write(0);
+
+              forall s in D1 {
+              var val = 0.0;
+              var in_degree:int = indegree[s].read();
+              var neighbourSet = inneighbor[s];
+              for i in 0..in_degree{
+                  ref t = neighbourSet[i];
+                  if nei[t] > 0 {
+                      val += PR[t]/nei[t];
+                  }
+              }
+              var newPR = (val*d) + ((1-d)/Nv);
+              if abs(newPR - PR[s]>0.00001){
+                  count.fetchAdd(1);
+              }
+              PR[s] = newPR;
+            }
+          }
+
+        write("$$$$$$$$$$$$PR=");
+        for i in PR {
+          writef("%i ", i); 
+        }
+        write("$$$$$$$$$$$$$$$$$$$$$$$\n"); 
+        return "okay";
+      }
+
+      
+      (srcN, dstN, startN, neighbourN) = restpart.splitMsgToTuple(4);
+
+      var ag = new owned SegGraphD(Nv, Ne, Directed, Weighted, srcN, dstN, startN, neighbourN, st);
+
+      for i in 1..1 do var temp = pr_kernel(ag.neighbour.a, ag.start_i.a, ag.src.a, ag.dst.a);
+            
+      proc return_PR(): string throws {
+          PRName = st.nextName();
+          var PREntry = new shared SymEntry(PR);
+          st.addEntry(PRName, PREntry);
+
+          var PRMsg =  'created ' + st.attrib(PRName);
+          return PRMsg;
+      }
+
+      var repMsg = return_PR();
+      return new MsgTuple(repMsg, MsgType.NORMAL);
+
+
+
+
+  }
 
   proc segBCMsg(cmd: string, payload: string, st: borrowed SymTab): MsgTuple throws {
       var (n_verticesN, n_edgesN, directedN, weightedN, restpart) = payload.splitMsgToTuple(5); 
