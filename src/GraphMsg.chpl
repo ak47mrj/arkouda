@@ -2165,10 +2165,12 @@ module GraphMsg {
       var PRName:string; 
       var srcN, dstN, startN, neighbourN:string;
       var d = 0.85;
+      var timer:Timer; 
+      timer.start(); 
 
       proc pr_kernel(nei:[?D1] int, start_i:[?D2] int, src:[?D3] int, dst:[?D4] int): string throws{
           var indegree = makeDistArray(Nv, atomic int);
-          var inneighbor = makeDistArray(Nv, list(int,parSafe=true));
+          var inneighbor = makeDistArray(Nv, list(int));
 
           forall s in D1 {
               PR[s] = 1/Nv;
@@ -2176,7 +2178,7 @@ module GraphMsg {
               inneighbor[s].clear();
           }
 
-          for s in D3 {
+          forall s in 0..Ne-1 {
               var start: int  = src[s];
               var end: int = dst[s];
               
@@ -2189,12 +2191,13 @@ module GraphMsg {
 
           while(count.read()>0){
               count.write(0);
+              var newPRList = makeDistArray(Nv, real);
 
               forall s in D1 {
               var val = 0.0;
               var in_degree:int = indegree[s].read();
               var neighbourSet = inneighbor[s];
-              for i in 0..in_degree{
+              for i in 0..in_degree-1{
                   ref t = neighbourSet[i];
                   if nei[t] > 0 {
                       val += PR[t]/nei[t];
@@ -2204,8 +2207,9 @@ module GraphMsg {
               if abs(newPR - PR[s]>0.00001){
                   count.fetchAdd(1);
               }
-              PR[s] = newPR;
+              newPRList[s] = newPR;
             }
+            PR <=> newPRList;
           }
 
         write("$$$$$$$$$$$$PR=");
@@ -2222,6 +2226,13 @@ module GraphMsg {
       var ag = new owned SegGraphD(Nv, Ne, Directed, Weighted, srcN, dstN, startN, neighbourN, st);
 
       for i in 1..1 do var temp = pr_kernel(ag.neighbour.a, ag.start_i.a, ag.src.a, ag.dst.a);
+
+      timer.stop(); 
+      writeln("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$");
+      writeln("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$");
+      writeln("$$$$$$$$$$$$$$$PR Time = ", timer.elapsed() ,"$$$$$$$$$$$$$$$$$$$$$$");
+      writeln("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$");
+      writeln("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$");
             
       proc return_PR(): string throws {
           PRName = st.nextName();
